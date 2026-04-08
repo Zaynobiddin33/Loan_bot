@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram Loan Accounting Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/loan_bot
+EnvironmentFile=/home/ubuntu/loan_bot/.env
+ExecStart=/bin/bash /home/ubuntu/loan_bot/run.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
