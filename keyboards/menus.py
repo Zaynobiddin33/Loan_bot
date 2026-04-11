@@ -23,7 +23,8 @@ def main_menu_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
         rows.extend(
             [
                 [KeyboardButton(text="➕ Guruh yaratish"), KeyboardButton(text="👤 A'zo qo'shish")],
-                [KeyboardButton(text="🗑 A'zoni o'chirish"), KeyboardButton(text="📋 Guruhlar")],
+                [KeyboardButton(text="🗑 A'zoni o'chirish"), KeyboardButton(text="🔁 Musor tartibi")],
+                [KeyboardButton(text="📋 Guruhlar")],
             ]
         )
 
@@ -32,6 +33,7 @@ def main_menu_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💸 Qarzni berish"), KeyboardButton(text="💰 Qarzni to'lash")],
             [KeyboardButton(text="📊 Statistikam"), KeyboardButton(text="📋 Tarix")],
             [KeyboardButton(text="💳 Kartam"), KeyboardButton(text="👥 Guruhlarim")],
+            [KeyboardButton(text="🗑 Musor Navbat")],
         ]
     )
 
@@ -166,6 +168,47 @@ def remove_member_keyboard(group_id: int, members: list[dict[str, Any]], page: i
             InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"),
             InlineKeyboardButton(text="➡️", callback_data=f"admin_remove_page:{group_id}:{page + 1}"),
         )
+
+    builder.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel"))
+    return builder.as_markup()
+
+
+def trash_order_keyboard(
+    members: list[dict[str, Any]],
+    selected_ids: list[int],
+    page: int,
+) -> InlineKeyboardMarkup:
+    selected_set = set(selected_ids)
+    remaining_members = [member for member in members if member["telegram_id"] not in selected_set]
+
+    total_pages = max(1, (len(remaining_members) - 1) // MEMBER_PAGE_SIZE + 1)
+    page = max(0, min(page, total_pages - 1))
+    start = page * MEMBER_PAGE_SIZE
+    page_members = remaining_members[start : start + MEMBER_PAGE_SIZE]
+
+    builder = InlineKeyboardBuilder()
+    for member in page_members:
+        builder.button(
+            text=member["display_name"],
+            callback_data=f"admin_trash_pick:{member['telegram_id']}:{page}",
+        )
+    builder.adjust(1)
+
+    if total_pages > 1:
+        builder.row(
+            InlineKeyboardButton(text="⬅️", callback_data=f"admin_trash_page:{page - 1}"),
+            InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"),
+            InlineKeyboardButton(text="➡️", callback_data=f"admin_trash_page:{page + 1}"),
+        )
+
+    if selected_ids:
+        builder.row(
+            InlineKeyboardButton(text="↩️ Oxirgisini olib tashlash", callback_data="admin_trash_undo"),
+            InlineKeyboardButton(text="🔄 Boshidan", callback_data="admin_trash_reset"),
+        )
+
+    if not remaining_members and members:
+        builder.row(InlineKeyboardButton(text="✅ Saqlash", callback_data="admin_trash_save"))
 
     builder.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel"))
     return builder.as_markup()

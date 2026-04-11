@@ -42,6 +42,122 @@ def _extract_forwarded_user(message: Message) -> tuple[int, str | None, str] | N
     return None
 
 
+def _build_trash_order_text(
+    group_name: str,
+    members: list[dict[str, Any]],
+    selected_ids: list[int],
+) -> str:
+    member_map = {member["telegram_id"]: member for member in members}
+    current_order_lines = [
+        f"{index}. {member['display_name']}"
+        for index, member in enumerate(members, start=1)
+    ]
+
+    selected_lines = [
+        f"{index}. {member_map[member_id]['display_name']}"
+        for index, member_id in enumerate(selected_ids, start=1)
+        if member_id in member_map
+    ]
+
+    remaining_members = [member for member in members if member["telegram_id"] not in set(selected_ids)]
+
+    lines = [
+        f"🔁 {group_name} uchun musor navbat tartibi",
+        "",
+        "Joriy tartib:",
+        *current_order_lines,
+        "",
+        "Yangi tartib:",
+    ]
+
+    if selected_lines:
+        lines.extend(selected_lines)
+    else:
+        lines.append("Hali tanlanmadi")
+
+    if remaining_members:
+        lines.extend(
+            [
+                "",
+                f"Keyingi o'rin uchun a'zoni tanlang ({len(selected_ids) + 1}-navbat).",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Yangi tartib tayyor. Saqlashni bosing.",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+async def _show_trash_order_builder(
+    target: Message | CallbackQuery,
+    state: FSMContext,
+    admin_id: int,
+    group_id: int,
+    page: int = 0,
+) -> None:
+    group = await queries.get_group(group_id)
+    if not group or group["admin_id"] != admin_id:
+        text = "⚠️ Ushbu guruh mavjud emas."
+        if isinstance(target, CallbackQuery):
+            await target.answer(text, show_alert=True)
+        else:
+            await target.answer(text)
+        return
+
+    members = await queries.get_group_members_in_trash_order(group_id)
+    if not members:
+        text = "⚠️ Bu guruhda hali a'zolar yo'q."
+        if isinstance(target, CallbackQuery):
+            await target.message.edit_text(text, reply_markup=menus.back_to_menu_inline())
+            await target.answer()
+        else:
+            await target.answer(text, reply_markup=menus.back_to_menu_inline())
+        return
+
+    if len(members) == 1:
+        text = (
+            f"🔁 {group['name']} uchun musor navbat tartibi\n\n"
+            f"1. {members[0]['display_name']}\n\n"
+            "Bu guruhda hozircha faqat bitta a'zo bor, shuning uchun tartibni o'zgartirish shart emas."
+        )
+        if isinstance(target, CallbackQuery):
+            await target.message.edit_text(text, reply_markup=menus.back_to_menu_inline())
+            await target.answer()
+        else:
+            await target.answer(text, reply_markup=menus.back_to_menu_inline())
+        return
+
+    data = await state.get_data()
+    valid_member_ids = {member["telegram_id"] for member in members}
+    selected_ids = [
+        member_id
+        for member_id in data.get("selected_trash_member_ids", [])
+        if member_id in valid_member_ids
+    ]
+
+    await state.set_state(AdminStates.setting_trash_order)
+    await state.update_data(
+        trash_order_group_id=group_id,
+        trash_order_group_name=group["name"],
+        selected_trash_member_ids=selected_ids,
+    )
+
+    text = _build_trash_order_text(group["name"], members, selected_ids)
+    markup = menus.trash_order_keyboard(members, selected_ids, page)
+
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=markup)
+        await target.answer()
+        return
+
+    await target.answer(text, reply_markup=markup)
+
+
 @router.message(F.text == "➕ Guruh yaratish")
 async def create_group_entry(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -385,3 +501,175 @@ async def manage_groups_handler(message: Message, state: FSMContext) -> None:
         )
 
     await message.answer("\n".join(lines).strip())
+
+
+@router.message(F.text == "🔁 Musor tartibi")
+async def trash_order_entry(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if not await _ensure_admin(message, message.from_user.id):
+        return
+
+    groups = await queries.get_admin_groups(message.from_user.id)
+    if not groups:
+        await message.answer("⚠️ Sizda hali hech qanday guruh yo'q. Avvalo guruh yarating.")
+        return
+
+    await message.answer(
+        "Musor navbat tartibini sozlamoqchi bo'lgan guruhni tanlang:",
+        reply_markup=menus.group_selection_keyboard(groups, "admin_trash_group"),
+    )
+
+
+@router.callback_query(F.data.startswith("admin_trash_group:"))
+async def trash_order_group_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _ensure_admin(callback, callback.from_user.id):
+        return
+
+    await state.clear()
+    group_id = int(callback.data.split(":")[1])
+    await _show_trash_order_builder(callback, state, callback.from_user.id, group_id)
+
+
+@router.callback_query(F.data.startswith("admin_trash_page:"), AdminStates.setting_trash_order)
+async def trash_order_page_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _ensure_admin(callback, callback.from_user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    group_id = data.get("trash_order_group_id")
+    if group_id is None:
+        await state.clear()
+        await callback.answer("⚠️ Jarayon tugagan. Qaytadan boshlang.", show_alert=True)
+        return
+
+    page = int(callback.data.split(":")[1])
+    await _show_trash_order_builder(callback, state, callback.from_user.id, group_id, page=page)
+
+
+@router.callback_query(F.data.startswith("admin_trash_pick:"), AdminStates.setting_trash_order)
+async def trash_order_pick_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _ensure_admin(callback, callback.from_user.id):
+        await state.clear()
+        return
+
+    _, member_id_text, page_text = callback.data.split(":")
+    member_id = int(member_id_text)
+    page = int(page_text)
+
+    data = await state.get_data()
+    group_id = data.get("trash_order_group_id")
+    if group_id is None:
+        await state.clear()
+        await callback.answer("⚠️ Jarayon tugagan. Qaytadan boshlang.", show_alert=True)
+        return
+
+    members = await queries.get_group_members_in_trash_order(group_id)
+    valid_member_ids = {member["telegram_id"] for member in members}
+    if member_id not in valid_member_ids:
+        await callback.answer("⚠️ Bu a'zo ro'yxatda topilmadi.", show_alert=True)
+        return
+
+    selected_ids = [
+        selected_id
+        for selected_id in data.get("selected_trash_member_ids", [])
+        if selected_id in valid_member_ids
+    ]
+    if member_id in selected_ids:
+        await callback.answer("⚠️ Bu a'zo allaqachon tanlangan.", show_alert=True)
+        return
+
+    selected_ids.append(member_id)
+    await state.update_data(selected_trash_member_ids=selected_ids)
+    await _show_trash_order_builder(callback, state, callback.from_user.id, group_id, page=page)
+
+
+@router.callback_query(F.data == "admin_trash_undo", AdminStates.setting_trash_order)
+async def trash_order_undo_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _ensure_admin(callback, callback.from_user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    group_id = data.get("trash_order_group_id")
+    if group_id is None:
+        await state.clear()
+        await callback.answer("⚠️ Jarayon tugagan. Qaytadan boshlang.", show_alert=True)
+        return
+
+    selected_ids = list(data.get("selected_trash_member_ids", []))
+    if not selected_ids:
+        await callback.answer("Tanlangan a'zo yo'q.", show_alert=True)
+        return
+
+    selected_ids.pop()
+    await state.update_data(selected_trash_member_ids=selected_ids)
+    await _show_trash_order_builder(callback, state, callback.from_user.id, group_id)
+
+
+@router.callback_query(F.data == "admin_trash_reset", AdminStates.setting_trash_order)
+async def trash_order_reset_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _ensure_admin(callback, callback.from_user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    group_id = data.get("trash_order_group_id")
+    if group_id is None:
+        await state.clear()
+        await callback.answer("⚠️ Jarayon tugagan. Qaytadan boshlang.", show_alert=True)
+        return
+
+    await state.update_data(selected_trash_member_ids=[])
+    await _show_trash_order_builder(callback, state, callback.from_user.id, group_id)
+
+
+@router.callback_query(F.data == "admin_trash_save", AdminStates.setting_trash_order)
+async def trash_order_save_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _ensure_admin(callback, callback.from_user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    group_id = data.get("trash_order_group_id")
+    group_name = data.get("trash_order_group_name", "Ushbu guruh")
+    selected_ids = list(data.get("selected_trash_member_ids", []))
+    if group_id is None:
+        await state.clear()
+        await callback.answer("⚠️ Jarayon tugagan. Qaytadan boshlang.", show_alert=True)
+        return
+
+    members = await queries.get_group_members_in_trash_order(group_id)
+    if len(selected_ids) != len(members):
+        await callback.answer("Avval barcha a'zolarni tartib bilan tanlang.", show_alert=True)
+        return
+
+    try:
+        await queries.set_group_trash_order(group_id, selected_ids)
+    except ValueError as error:
+        await state.clear()
+        await callback.message.edit_text(
+            f"⚠️ {error}",
+            reply_markup=menus.back_to_menu_inline(),
+        )
+        await callback.answer()
+        return
+
+    ordered_members = await queries.get_group_members_in_trash_order(group_id)
+    await state.clear()
+
+    lines = [
+        f"✅ {group_name} uchun musor navbat tartibi saqlandi.",
+        "",
+        "Yangi tartib:",
+    ]
+    lines.extend(
+        f"{index}. {member['display_name']}"
+        for index, member in enumerate(ordered_members, start=1)
+    )
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=menus.back_to_menu_inline(),
+    )
+    await callback.answer()

@@ -8,6 +8,7 @@ The bot interface is currently in Uzbek, while this README is written for develo
 
 - Create and manage debt groups from Telegram
 - Add members by forwarding one of their messages or by entering their Telegram ID manually
+- Configure the member order used for `Musor Navbat`
 - Record a shared expense and split it across selected participants
 - Exclude the lender's own share from debt creation when the lender also took part in the expense
 - Repay debts partially or fully
@@ -19,6 +20,8 @@ The bot interface is currently in Uzbek, while this README is written for develo
   - total repaid
   - net position
 - Store and reveal saved card numbers from the stats screen
+- Show `Musor Navbat` for each group with every-other-day trash duty rotation
+- Send an automatic 08:00 reminder to the member whose trash duty is active that day
 - Export group history as a `.txt` report for:
   - today
   - this week
@@ -32,7 +35,7 @@ The bot interface is currently in Uzbek, while this README is written for develo
 - `aiogram` 3
 - SQLite
 - `python-dotenv`
-- `APScheduler` is listed in dependencies, although the current codebase does not use it yet
+- `APScheduler` for daily trash-duty reminders
 
 ## How The Bot Works
 
@@ -45,6 +48,7 @@ Admin-only actions:
 - `➕ Guruh yaratish` to create a group
 - `👤 A'zo qo'shish` to add a member
 - `🗑 A'zoni o'chirish` to remove a member
+- `🔁 Musor tartibi` to set the trash-duty order for a group
 - `📋 Guruhlar` to view owned groups, member counts, and active debt totals
 
 When a group is created, the admin is also added as that group's first member.
@@ -55,12 +59,23 @@ Members can:
 
 - `💸 Qarzni berish` to record a loan/shared expense
 - `💰 Qarzni to'lash` to repay a debt
+- `🗑 Musor Navbat` to see whose turn it is to take out the trash
 - `📊 Statistikam` to view balances and totals
 - `📋 Tarix` to export group history
 - `💳 Kartam` to save or update a card number
 - `👥 Guruhlarim` to see the groups they belong to
 
 The bot uses button-based flows and FSM states for multi-step actions.
+
+## Musor Navbat Logic
+
+Each group has its own trash-duty rotation.
+
+- The rotation starts from the day the feature is initialized for that group
+- Active duty happens every other day
+- The day between duties is a skip day with no assignee
+- Group members are rotated in the admin-defined order
+- At `08:00` Asia/Tashkent time, the active member for that day receives a reminder
 
 ## Loan And Payment Logic
 
@@ -98,6 +113,7 @@ Tables currently used:
 - `group_members`
 - `loans`
 - `payments`
+- `trash_rotation_settings`
 
 The database schema is created automatically on startup.
 
@@ -192,7 +208,8 @@ loan_bot/
 │   ├── history.py         # History export
 │   ├── loans.py           # Loan creation flow
 │   ├── payments.py        # Repayment flow
-│   └── stats.py           # Main menu, stats, card storage
+│   ├── stats.py           # Main menu, stats, card storage
+│   └── trash.py           # Trash-duty lookup and reminders
 ├── keyboards/
 │   └── menus.py           # Reply and inline keyboards
 ├── middlewares/

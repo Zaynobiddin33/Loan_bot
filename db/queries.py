@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any
 
@@ -10,6 +10,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 from config import DB_PATH
+from utils.formatters import now_local
 
 _DB_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
@@ -24,6 +25,85 @@ def _clean_name(full_name: str | None, username: str | None, telegram_id: int) -
 
 def _member_name(member: dict[str, Any]) -> str:
     return _clean_name(member.get("full_name"), member.get("username"), member["telegram_id"])
+
+
+def _normalize_trash_order_sync(db: sqlite3.Connection, group_id: int) -> None:
+    cursor = db.execute(
+        """
+        SELECT id
+        FROM group_members
+        WHERE group_id = ?
+        ORDER BY
+            CASE WHEN trash_order_position IS NULL THEN 1 ELSE 0 END,
+            trash_order_position,
+            joined_at,
+            id
+        """,
+        (group_id,),
+    )
+    member_rows = cursor.fetchall()
+    for index, row in enumerate(member_rows, start=1):
+        db.execute(
+            "UPDATE group_members SET trash_order_position = ? WHERE id = ?",
+            (index, row["id"]),
+        )
+
+
+def _next_trash_order_position_sync(db: sqlite3.Connection, group_id: int) -> int:
+    cursor = db.execute(
+        "SELECT COALESCE(MAX(trash_order_position), 0) AS max_position FROM group_members WHERE group_id = ?",
+        (group_id,),
+    )
+    row = cursor.fetchone()
+    return int(row["max_position"] or 0) + 1
+
+
+def _date_text(value: date) -> str:
+    return value.isoformat()
+
+
+def _parse_date_text(value: str) -> date:
+    return date.fromisoformat(value)
+
+
+def _compute_trash_turn(
+    members: Sequence[dict[str, Any]],
+    start_date: date,
+    target_date: date,
+) -> dict[str, Any]:
+    if not members:
+        return {
+            "is_skip_day": True,
+            "assignee": None,
+            "next_assignee": None,
+            "next_turn_date": None,
+        }
+
+    if target_date < start_date:
+        return {
+            "is_skip_day": True,
+            "assignee": None,
+            "next_assignee": members[0],
+            "next_turn_date": start_date,
+        }
+
+    day_offset = (target_date - start_date).days
+    if day_offset % 2 == 1:
+        next_cycle_index = (day_offset + 1) // 2
+        return {
+            "is_skip_day": True,
+            "assignee": None,
+            "next_assignee": members[next_cycle_index % len(members)],
+            "next_turn_date": target_date + timedelta(days=1),
+        }
+
+    cycle_index = day_offset // 2
+    return {
+        "is_skip_day": False,
+        "assignee": members[cycle_index % len(members)],
+        "next_assignee": members[(cycle_index + 1) % len(members)],
+        "next_turn_date": target_date + timedelta(days=2),
+    }
 
 
 def _run_sync_db(func):
@@ -94,6 +174,23 @@ def sync_admins(admin_ids: Sequence[int]) -> None:
         db.commit()
 
 
+def sync_trash_rotations(start_date: date | None = None) -> None:
+    start_date_text = _date_text(start_date or now_local().date())
+
+    with sqlite3.connect(str(DB_PATH)) as db:
+        db.execute(
+            """
+            INSERT INTO trash_rotation_settings(group_id, start_date)
+            SELECT g.id, ?
+            FROM groups g
+            LEFT JOIN trash_rotation_settings trs ON trs.group_id = g.id
+            WHERE trs.group_id IS NULL
+            """,
+            (start_date_text,),
+        )
+        db.commit()
+
+
 async def is_admin(telegram_id: int) -> bool:
     def _sync(db):
         cursor = db.execute(
@@ -137,6 +234,8 @@ async def create_group(
     admin_username: str | None,
     admin_full_name: str,
 ) -> dict[str, Any]:
+    start_date_text = _date_text(now_local().date())
+
     def _sync(db):
         cursor = db.execute(
             "INSERT INTO groups(name, admin_id) VALUES (?, ?)",
@@ -146,10 +245,17 @@ async def create_group(
 
         db.execute(
             """
-            INSERT INTO group_members(group_id, telegram_id, username, full_name)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO group_members(group_id, telegram_id, username, full_name, trash_order_position)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (group_id, admin_id, admin_username, admin_full_name),
+            (group_id, admin_id, admin_username, admin_full_name, 1),
+        )
+        db.execute(
+            """
+            INSERT OR IGNORE INTO trash_rotation_settings(group_id, start_date)
+            VALUES (?, ?)
+            """,
+            (group_id, start_date_text),
         )
         db.commit()
 
@@ -244,6 +350,45 @@ async def get_group_members(group_id: int, exclude_user_id: int | None = None) -
     return members
 
 
+async def get_group_members_in_join_order(group_id: int) -> list[dict[str, Any]]:
+    def _sync(db):
+        cursor = db.execute(
+            """
+            SELECT id, telegram_id, username, full_name, card_number, joined_at
+            FROM group_members
+            WHERE group_id = ?
+            ORDER BY joined_at, id
+            """,
+            (group_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    members = await _run_sync_db(_sync)
+    for member in members:
+        member["display_name"] = _member_name(member)
+    return members
+
+
+async def get_group_members_in_trash_order(group_id: int) -> list[dict[str, Any]]:
+    def _sync(db):
+        _normalize_trash_order_sync(db, group_id)
+        cursor = db.execute(
+            """
+            SELECT id, telegram_id, username, full_name, card_number, joined_at, trash_order_position
+            FROM group_members
+            WHERE group_id = ?
+            ORDER BY trash_order_position, joined_at, id
+            """,
+            (group_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    members = await _run_sync_db(_sync)
+    for member in members:
+        member["display_name"] = _member_name(member)
+    return members
+
+
 async def get_group_member(group_id: int, telegram_id: int) -> dict[str, Any] | None:
     def _sync(db):
         cursor = db.execute(
@@ -305,17 +450,97 @@ async def add_member_to_group(
                 (resolved_username, resolved_full_name, resolved_card_number, group_id, telegram_id),
             )
         else:
+            next_position = _next_trash_order_position_sync(db, group_id)
             db.execute(
                 """
-                INSERT INTO group_members(group_id, telegram_id, username, full_name, card_number)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO group_members(group_id, telegram_id, username, full_name, card_number, trash_order_position)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (group_id, telegram_id, username, full_name, card_number),
+                (group_id, telegram_id, username, full_name, card_number, next_position),
             )
         db.commit()
         return existing is None
 
     return await _run_sync_db(_sync)
+
+
+async def get_all_groups_basic() -> list[dict[str, Any]]:
+    def _sync(db):
+        cursor = db.execute(
+            """
+            SELECT id, name, created_at
+            FROM groups
+            ORDER BY created_at, id
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    return await _run_sync_db(_sync)
+
+
+async def get_group_trash_rotation(group_id: int) -> dict[str, Any] | None:
+    group = await get_group(group_id)
+    if not group:
+        return None
+
+    def _sync(db):
+        cursor = db.execute(
+            """
+            SELECT start_date
+            FROM trash_rotation_settings
+            WHERE group_id = ?
+            """,
+            (group_id,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    rotation = await _run_sync_db(_sync)
+    start_date = _parse_date_text(rotation["start_date"]) if rotation else now_local().date()
+    members = await get_group_members_in_trash_order(group_id)
+    turn = _compute_trash_turn(members, start_date, now_local().date())
+
+    assignee = turn["assignee"]
+    next_assignee = turn["next_assignee"]
+    next_turn_date = turn["next_turn_date"]
+
+    return {
+        "group_id": group_id,
+        "group_name": group["name"],
+        "start_date": _date_text(start_date),
+        "is_skip_day": turn["is_skip_day"],
+        "assignee_id": assignee["telegram_id"] if assignee else None,
+        "assignee_name": assignee["display_name"] if assignee else None,
+        "next_assignee_id": next_assignee["telegram_id"] if next_assignee else None,
+        "next_assignee_name": next_assignee["display_name"] if next_assignee else None,
+        "next_turn_date": _date_text(next_turn_date) if next_turn_date else None,
+        "member_count": len(members),
+        "order": [
+            {
+                "telegram_id": member["telegram_id"],
+                "name": member["display_name"],
+                "position": index,
+            }
+            for index, member in enumerate(members, start=1)
+        ],
+    }
+
+
+async def get_today_trash_rotation(group_id: int) -> dict[str, Any] | None:
+    return await get_group_trash_rotation(group_id)
+
+
+async def get_today_trash_reminders() -> list[dict[str, Any]]:
+    reminders: list[dict[str, Any]] = []
+    groups = await get_all_groups_basic()
+
+    for group in groups:
+        rotation = await get_today_trash_rotation(group["id"])
+        if not rotation or rotation["is_skip_day"] or not rotation["assignee_id"]:
+            continue
+        reminders.append(rotation)
+
+    return reminders
 
 
 async def remove_member_from_group(group_id: int, telegram_id: int) -> None:
@@ -324,6 +549,38 @@ async def remove_member_from_group(group_id: int, telegram_id: int) -> None:
             "DELETE FROM group_members WHERE group_id = ? AND telegram_id = ?",
             (group_id, telegram_id),
         )
+        _normalize_trash_order_sync(db, group_id)
+        db.commit()
+
+    await _run_sync_db(_sync)
+
+
+async def set_group_trash_order(group_id: int, ordered_member_ids: Sequence[int]) -> None:
+    normalized_ids = [int(member_id) for member_id in ordered_member_ids]
+
+    def _sync(db):
+        cursor = db.execute(
+            """
+            SELECT telegram_id
+            FROM group_members
+            WHERE group_id = ?
+            ORDER BY trash_order_position, joined_at, id
+            """,
+            (group_id,),
+        )
+        current_member_ids = [int(row["telegram_id"]) for row in cursor.fetchall()]
+        if sorted(current_member_ids) != sorted(normalized_ids) or len(current_member_ids) != len(normalized_ids):
+            raise ValueError("A'zolar ro'yxati o'zgargan. Iltimos, tartibni qaytadan tuzing.")
+
+        for position, member_id in enumerate(normalized_ids, start=1):
+            db.execute(
+                """
+                UPDATE group_members
+                SET trash_order_position = ?
+                WHERE group_id = ? AND telegram_id = ?
+                """,
+                (position, group_id, member_id),
+            )
         db.commit()
 
     await _run_sync_db(_sync)

@@ -6,6 +6,7 @@ class AdminStates(StatesGroup):
     waiting_member_id = State()
     waiting_member_name = State()
     waiting_remove_confirm = State()
+    setting_trash_order = State()
 
 
 class LoanStates(StatesGroup):
