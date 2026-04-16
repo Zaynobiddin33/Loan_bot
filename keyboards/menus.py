@@ -223,13 +223,73 @@ def card_update_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def stats_card_keyboard(entries: list[dict[str, Any]]) -> InlineKeyboardMarkup | None:
+def stats_members_keyboard(
+    entries: list[dict[str, Any]],
+    group_id: int,
+    page: int = 0,
+) -> InlineKeyboardMarkup | None:
     if not entries:
-        return None
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🏠 Menyuga qaytish", callback_data="back_menu")]]
+        )
+
+    total_pages = max(1, (len(entries) - 1) // MEMBER_PAGE_SIZE + 1)
+    page = max(0, min(page, total_pages - 1))
+    start = page * MEMBER_PAGE_SIZE
+    page_entries = entries[start : start + MEMBER_PAGE_SIZE]
 
     builder = InlineKeyboardBuilder()
-    for entry in entries:
-        builder.button(text=f"💳 {entry['name']}", callback_data=f"stats_card:{entry['telegram_id']}")
+    for entry in page_entries:
+        builder.button(
+            text=entry["button_text"],
+            callback_data=f"stats_member:{group_id}:{entry['telegram_id']}",
+        )
     builder.adjust(1)
+
+    if total_pages > 1:
+        builder.row(
+            InlineKeyboardButton(text="⬅️", callback_data=f"stats_members_page:{group_id}:{page - 1}"),
+            InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"),
+            InlineKeyboardButton(text="➡️", callback_data=f"stats_members_page:{group_id}:{page + 1}"),
+        )
+
     builder.row(InlineKeyboardButton(text="🏠 Menyuga qaytish", callback_data="back_menu"))
     return builder.as_markup()
+
+
+def stats_pair_period_keyboard(
+    group_id: int,
+    member_id: int,
+    selected_period: str,
+) -> InlineKeyboardMarkup:
+    def _label(period: str, text: str) -> str:
+        return f"✅ {text}" if period == selected_period else text
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_label("today", "📅 Bugun"),
+                    callback_data=f"stats_pair:{group_id}:{member_id}:today",
+                ),
+                InlineKeyboardButton(
+                    text=_label("week", "📅 Hafta"),
+                    callback_data=f"stats_pair:{group_id}:{member_id}:week",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_label("month", "📅 Oy"),
+                    callback_data=f"stats_pair:{group_id}:{member_id}:month",
+                ),
+                InlineKeyboardButton(
+                    text=_label("all", "📅 Barchasi"),
+                    callback_data=f"stats_pair:{group_id}:{member_id}:all",
+                ),
+            ],
+            [
+                InlineKeyboardButton(text="👥 A'zolar", callback_data=f"stats_group:{group_id}"),
+                InlineKeyboardButton(text="🏠 Menyu", callback_data="back_menu"),
+            ],
+        ]
+    )

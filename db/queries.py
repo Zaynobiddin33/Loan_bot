@@ -808,6 +808,206 @@ async def get_stats_for_user(group_id: int, user_id: int) -> dict[str, Any]:
     }
 
 
+async def get_stats_member_entries(group_id: int, user_id: int) -> list[dict[str, Any]]:
+    members = await get_group_members(group_id, exclude_user_id=user_id)
+    entries: list[dict[str, Any]] = []
+
+    for member in members:
+        net = await get_net_balance(group_id, user_id, member["telegram_id"])
+        if net["direction"] == "person_a_owes":
+            sort_group = 0
+        elif net["direction"] == "person_b_owes":
+            sort_group = 1
+        else:
+            sort_group = 2
+
+        entries.append(
+            {
+                "telegram_id": member["telegram_id"],
+                "name": member["display_name"],
+                "net": net,
+                "sort_group": sort_group,
+            }
+        )
+
+    entries.sort(
+        key=lambda item: (
+            item["sort_group"],
+            -item["net"]["amount"],
+            item["name"].lower(),
+        )
+    )
+    return entries
+
+
+async def get_pair_transaction_history(
+    group_id: int,
+    user_id: int,
+    other_id: int,
+    start_utc: datetime | None = None,
+    end_utc: datetime | None = None,
+) -> dict[str, Any] | None:
+    other_member = await get_group_member(group_id, other_id)
+    if not other_member:
+        return None
+
+    loans_query = """
+        SELECT
+            l.id,
+            l.created_at,
+            l.amount,
+            l.comment,
+            l.status,
+            l.lender_id,
+            l.borrower_id,
+            COALESCE(SUM(p.amount), 0) AS paid_amount,
+            ROUND(l.amount - COALESCE(SUM(p.amount), 0), 2) AS remaining_amount,
+            lender.full_name AS lender_full_name,
+            lender.username AS lender_username,
+            borrower.full_name AS borrower_full_name,
+            borrower.username AS borrower_username
+        FROM loans l
+        LEFT JOIN payments p ON p.loan_id = l.id
+        LEFT JOIN group_members lender
+            ON lender.group_id = l.group_id AND lender.telegram_id = l.lender_id
+        LEFT JOIN group_members borrower
+            ON borrower.group_id = l.group_id AND borrower.telegram_id = l.borrower_id
+        WHERE l.group_id = ?
+          AND (
+                (l.lender_id = ? AND l.borrower_id = ?)
+             OR (l.lender_id = ? AND l.borrower_id = ?)
+          )
+    """
+    payments_query = """
+        SELECT
+            p.id,
+            p.loan_id,
+            p.payer_id,
+            p.amount,
+            p.proof_type,
+            p.proof_content,
+            p.note,
+            p.approved_at,
+            l.lender_id,
+            l.borrower_id,
+            payer.full_name AS payer_full_name,
+            payer.username AS payer_username,
+            lender.full_name AS lender_full_name,
+            lender.username AS lender_username
+        FROM payments p
+        JOIN loans l ON l.id = p.loan_id
+        LEFT JOIN group_members payer
+            ON payer.group_id = l.group_id AND payer.telegram_id = p.payer_id
+        LEFT JOIN group_members lender
+            ON lender.group_id = l.group_id AND lender.telegram_id = l.lender_id
+        WHERE l.group_id = ?
+          AND (
+                (l.lender_id = ? AND l.borrower_id = ?)
+             OR (l.lender_id = ? AND l.borrower_id = ?)
+          )
+    """
+
+    params: list[Any] = [group_id, user_id, other_id, other_id, user_id]
+    payment_params: list[Any] = [group_id, user_id, other_id, other_id, user_id]
+
+    if start_utc is not None:
+        start_text = start_utc.strftime("%Y-%m-%d %H:%M:%S")
+        loans_query += " AND l.created_at >= ?"
+        payments_query += " AND p.approved_at >= ?"
+        params.append(start_text)
+        payment_params.append(start_text)
+
+    if end_utc is not None:
+        end_text = end_utc.strftime("%Y-%m-%d %H:%M:%S")
+        loans_query += " AND l.created_at <= ?"
+        payments_query += " AND p.approved_at <= ?"
+        params.append(end_text)
+        payment_params.append(end_text)
+
+    loans_query += " GROUP BY l.id ORDER BY l.created_at DESC, l.id DESC"
+    payments_query += " ORDER BY p.approved_at DESC, p.id DESC"
+
+    def _sync(db):
+        loan_cursor = db.execute(loans_query, tuple(params))
+        payment_cursor = db.execute(payments_query, tuple(payment_params))
+        return loan_cursor.fetchall(), payment_cursor.fetchall()
+
+    loan_rows, payment_rows = await _run_sync_db(_sync)
+    current_net = await get_net_balance(group_id, user_id, other_id)
+
+    transactions: list[dict[str, Any]] = []
+    totals = {
+        "loans_you_gave": 0.0,
+        "loans_you_received": 0.0,
+        "payments_you_made": 0.0,
+        "payments_you_received": 0.0,
+    }
+
+    for row in loan_rows:
+        item = dict(row)
+        lender_name = _clean_name(item["lender_full_name"], item["lender_username"], item["lender_id"])
+        borrower_name = _clean_name(item["borrower_full_name"], item["borrower_username"], item["borrower_id"])
+        you_are_lender = item["lender_id"] == user_id
+
+        if you_are_lender:
+            totals["loans_you_gave"] += float(item["amount"])
+            title = f"Siz {borrower_name} ga qarz berdingiz"
+        else:
+            totals["loans_you_received"] += float(item["amount"])
+            title = f"{lender_name} sizga qarz berdi"
+
+        transactions.append(
+            {
+                "kind": "loan",
+                "timestamp": item["created_at"],
+                "amount": _round_amount(item["amount"]),
+                "title": title,
+                "comment": item["comment"],
+                "status": item["status"],
+                "remaining_amount": _round_amount(item["remaining_amount"]),
+                "paid_amount": _round_amount(item["paid_amount"]),
+            }
+        )
+
+    for row in payment_rows:
+        item = dict(row)
+        payer_name = _clean_name(item["payer_full_name"], item["payer_username"], item["payer_id"])
+        lender_name = _clean_name(item["lender_full_name"], item["lender_username"], item["lender_id"])
+        you_are_payer = item["payer_id"] == user_id
+
+        if you_are_payer:
+            totals["payments_you_made"] += float(item["amount"])
+            title = f"Siz {lender_name} ga to'lov qildingiz"
+        else:
+            totals["payments_you_received"] += float(item["amount"])
+            title = f"{payer_name} sizga to'lov qildi"
+
+        transactions.append(
+            {
+                "kind": "payment",
+                "timestamp": item["approved_at"],
+                "amount": _round_amount(item["amount"]),
+                "title": title,
+                "note": item.get("note"),
+                "proof_type": item["proof_type"],
+                "proof_content": item["proof_content"],
+            }
+        )
+
+    transactions.sort(key=lambda item: item["timestamp"], reverse=True)
+
+    for key, value in totals.items():
+        totals[key] = _round_amount(value)
+
+    return {
+        "member_id": other_id,
+        "member_name": other_member["display_name"],
+        "current_net": current_net,
+        "totals": totals,
+        "transactions": transactions,
+    }
+
+
 async def record_payment(
     group_id: int,
     payer_id: int,

@@ -1,6 +1,6 @@
 # Loan Bot
 
-`Loan Bot` is a Telegram bot for tracking debts inside small trusted groups. It lets an admin create groups and add members, then helps members record shared expenses, repayments, card numbers, statistics, and exportable history reports.
+`Loan Bot` is a Telegram bot for tracking debts inside small trusted groups. It lets an admin create groups and add members, then helps members record shared expenses, repayments, card numbers, balance summaries, pairwise transaction histories, and exportable history reports.
 
 The bot interface is currently in Uzbek, while this README is written for developers and deployers.
 
@@ -19,7 +19,8 @@ The bot interface is currently in Uzbek, while this README is written for develo
   - total loaned out
   - total repaid
   - net position
-- Store and reveal saved card numbers from the stats screen
+- Store personal card numbers
+- Show per-member transaction history from the `Statistikam` screen with period filters
 - Show `Musor Navbat` for each group with every-other-day trash duty rotation
 - Send an automatic 08:00 reminder to the member whose trash duty is active that day
 - Export group history as a `.txt` report for:
@@ -60,7 +61,7 @@ Members can:
 - `💸 Qarzni berish` to record a loan/shared expense
 - `💰 Qarzni to'lash` to repay a debt
 - `🗑 Musor Navbat` to see whose turn it is to take out the trash
-- `📊 Statistikam` to view balances and totals
+- `📊 Statistikam` to view balances, choose a member, and inspect pairwise transactions for today, this week, this month, or all time
 - `📋 Tarix` to export group history
 - `💳 Kartam` to save or update a card number
 - `👥 Guruhlarim` to see the groups they belong to
