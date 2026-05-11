@@ -33,7 +33,7 @@ def main_menu_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💸 Qarzni berish"), KeyboardButton(text="💰 Qarzni to'lash")],
             [KeyboardButton(text="📊 Statistikam"), KeyboardButton(text="📋 Tarix")],
             [KeyboardButton(text="💳 Kartam"), KeyboardButton(text="👥 Guruhlarim")],
-            [KeyboardButton(text="🗑 Musor Navbat")],
+            [KeyboardButton(text="🗑 Musor Navbat"), KeyboardButton(text="🔔 Eslatma yuborish")],
         ]
     )
 
@@ -118,6 +118,66 @@ def borrower_selection_keyboard(
 
     builder.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel"))
     return builder.as_markup()
+
+
+def reminder_debtor_selection_keyboard(
+    debtors: list[dict[str, Any]],
+    selected_ids: set[int],
+    page: int,
+) -> InlineKeyboardMarkup:
+    total_pages = max(1, (len(debtors) - 1) // MEMBER_PAGE_SIZE + 1)
+    page = max(0, min(page, total_pages - 1))
+    start = page * MEMBER_PAGE_SIZE
+    page_debtors = debtors[start : start + MEMBER_PAGE_SIZE]
+
+    builder = InlineKeyboardBuilder()
+    all_debtor_ids = {debtor["telegram_id"] for debtor in debtors}
+    all_selected = bool(debtors) and selected_ids == all_debtor_ids
+    all_icon = "✅" if all_selected else "⬜️"
+    builder.button(text=f"{all_icon} Barcha qarzdorlar", callback_data=f"reminder_toggle_all:{page}")
+
+    for debtor in page_debtors:
+        icon = "✅" if debtor["telegram_id"] in selected_ids else "⬜️"
+        builder.button(
+            text=f"{icon} {debtor['name']} — {format_amount(debtor['amount'])}",
+            callback_data=f"reminder_toggle:{debtor['telegram_id']}:{page}",
+        )
+
+    builder.adjust(1)
+
+    if total_pages > 1:
+        builder.row(
+            InlineKeyboardButton(text="⬅️", callback_data=f"reminder_page:{page - 1}"),
+            InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"),
+            InlineKeyboardButton(text="➡️", callback_data=f"reminder_page:{page + 1}"),
+        )
+
+    if selected_ids:
+        builder.row(InlineKeyboardButton(text="➡️ Davom etish", callback_data="reminder_continue"))
+
+    builder.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel"))
+    return builder.as_markup()
+
+
+def reminder_message_type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Standart xabar", callback_data="reminder_msg:default")],
+            [InlineKeyboardButton(text="✏️ O'z matnim", callback_data="reminder_msg:custom")],
+            [InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel")],
+        ]
+    )
+
+
+def reminder_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Yuborish", callback_data="reminder_send"),
+                InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel"),
+            ]
+        ]
+    )
 
 
 def creditor_keyboard(creditors: list[dict[str, Any]]) -> InlineKeyboardMarkup:

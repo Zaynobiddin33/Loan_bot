@@ -1,4 +1,4 @@
-from . import admin, history, loans, payments, stats, trash
+from . import admin, history, loans, payments, reminders, stats, trash
 
 routers = [
     stats.router,
@@ -7,6 +7,7 @@ routers = [
     payments.router,
     trash.router,
     history.router,
+    reminders.router,
 ]
 
 __all__ = ["routers"]

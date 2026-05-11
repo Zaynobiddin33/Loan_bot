@@ -27,3 +27,11 @@ class PaymentStates(StatesGroup):
 
 class CardStates(StatesGroup):
     enter_card = State()
+
+
+class ReminderStates(StatesGroup):
+    select_group = State()
+    select_debtors = State()
+    select_message_type = State()
+    enter_custom_text = State()
+    confirm_send = State()
